@@ -1,0 +1,274 @@
+---
+title: "peptide_sequencing"
+author: "Shangsi Lin"
+date: "2024-10-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+```
+
+This file is designed to do peptide sequencing
+
+```{r}
+dictionary = read_xlsx("Amino_acids_monoisotopic_ mass.xlsx") %>% 
+  select(one_letter_code, Monoisotopic_Mass) %>% 
+  rename(name = one_letter_code, mass = Monoisotopic_Mass) %>% 
+  filter(name %in% c("G", "S", "W", "R", "L", "V"))
+
+
+# Add function for loading the dataset to be sequenced
+load_df = function(df_name){
+  read.csv(df_name, skip = 1) %>% 
+  janitor::clean_names() %>% 
+  rename(apex_rt = x_point, monoisotopic_mass = x_thompsons, sum_intensity = y_counts) %>% 
+  arrange(desc(monoisotopic_mass)) %>%
+  select(monoisotopic_mass, sum_intensity, apex_rt) %>% 
+  mutate(sum_intensity = as.numeric(sum_intensity)) %>% 
+  drop_na()
+}
+
+# Filter_df function
+# Filters the current df to a smaller df containing monoisotopic mass that are smaller/larger than the possible upper/lower limit for sequencing, this increases the efficiency of the algorithm
+filter_desc = function(df, mass_bound, version){
+  if(version == TRUE){
+    return(filter(df, monoisotopic_mass >= (df$monoisotopic_mass[1] - mass_bound)))
+  } else {
+    return(filter(df, monoisotopic_mass <= (df$monoisotopic_mass[1] + mass_bound)))
+  }
+}
+
+mass_bound = max(dictionary$mass + 1)
+```
+
+### The parts below this line is for sequencing
+
+#### Matcher function
+```{r}
+# Remove the following comments if you want to test the matcher function
+#test_df =  data.frame(matrix(ncol = 3))
+#colnames(test_df) = c("monoisotopic_mass", "sum_intensity", "apex_rt")
+#test_df[1,] = c(1345.0484, 100, 1)
+#test_df[2,] = c(1040.007,200, 1) 
+#test_df[3,] = c(1306.0254, 180, 1)
+#test_df[4,] = c(1039.023, 250, 1)
+#test_df[5,] = c(1000,120, 1)
+
+
+
+#Match mass delta with the dictionary to do base calling, going descending
+matcher_desc = function(match_df, match_dict, nth_attempt) {
+  found_match = 0
+  return_df = data.frame(matrix(ncol = 5)) # create the df to be returned
+  colnames(return_df) = c("base_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+  for(i in 2:nrow(match_df)) {
+    for(j in 1:nrow(match_dict)) {
+      if(ppm((match_df$monoisotopic_mass[1] - match_dict$mass[j]), match_df$monoisotopic_mass[i])){
+        found_match = found_match + 1 #numbers of matches found
+        return_df[found_match,1] = dictionary$name[j]
+        return_df[found_match,2] = match_df$monoisotopic_mass[i]
+        return_df[found_match,3] = match_df$sum_intensity[i]
+        return_df[found_match,4] = match_df$apex_rt[i]
+        return_df[found_match,5] = nth_attempt
+      }
+    }
+  }
+  return_df = return_df %>%
+    filter(sum_intensity == max(sum_intensity))
+  return(return_df)
+}
+
+#Match mass delta with the dictionary to do base calling, going ascending
+matcher_asce = function(match_df, match_dict, nth_attempt) {
+  found_match = 0
+  return_df = data.frame(matrix(ncol = 5)) # create the df to be returned
+  colnames(return_df) = c("base_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+  for(i in 1:nrow(match_df - 1)) {
+    for(j in 1:nrow(match_dict)) {
+      if(ppm((match_df$monoisotopic_mass[i] - match_dict$mass[j]), match_df$monoisotopic_mass[nrow(match_df)])){
+        found_match = found_match + 1 #numbers of matches found
+        return_df[found_match,1] = dictionary$name[j]
+        return_df[found_match,2] = match_df$monoisotopic_mass[i]
+        return_df[found_match,3] = match_df$sum_intensity[i]
+        return_df[found_match,4] = match_df$apex_rt[i]
+        return_df[found_match,5] = nth_attempt
+      }
+    }
+  }
+  return_df = return_df %>%
+    filter(sum_intensity == max(sum_intensity))
+  return(return_df)
+}
+
+#loop_down_match function
+loop_down_match = function(df, mass_bound, dictionary, return_df, nth_attempt, begin){
+  filtered_df = filter_desc(df, mass_bound, version = TRUE) #try to find the first match
+  if(nrow(filtered_df) > 1){
+    matched_row = matcher_desc(filtered_df, dictionary, nth_attempt)
+    if(!is.na(matched_row[1,1])){
+      if(begin == FALSE){
+        temp_row = df[1,] %>% 
+          mutate(n_iteration = nth_attempt, base_name = "High") %>% 
+          select(base_name, monoisotopic_mass, sum_intensity, apex_rt, n_iteration) 
+        return_df = rbind(return_df, temp_row) # include the beginning mass point
+      }
+      begin = TRUE
+      return_df = rbind(return_df, matched_row) #add the found row for return
+      temp_df = df %>% 
+        filter(monoisotopic_mass <= matched_row[1,2])
+      if(nrow(temp_df) > 1){
+        return_df = loop_down_match(temp_df, mass_bound, dictionary, return_df, nth_attempt, begin)
+      }
+    }
+  }
+  return(return_df) 
+}
+
+# For testing
+#output_df = data.frame(matrix(ncol = 5))
+#colnames(output_df) = c("base_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+#output_df = output_df %>% 
+#  drop_na()
+#df = filter(df, monoisotopic_mass <= 6331.868)
+#test_df_result = loop_down_match(df, mass_bound, dictionary, output_df, 1, begin = FALSE)
+
+#loop_up_match function
+loop_up_match = function(df, mass_bound, dictionary, return_df, nth_attempt, begin){
+  filtered_df = filter_desc(df, mass_bound, version = FALSE) #try to find the first match
+  if(nrow(filtered_df) > 1){
+    matched_row = matcher_asce(filtered_df, dictionary, nth_attempt)
+    if(!is.na(matched_row[1,1])){ 
+      if(begin == FALSE){
+        temp_row = df[nrow(df),] %>% 
+          mutate(n_iteration = nth_attempt, base_name = "High") %>% 
+          select(base_name, monoisotopic_mass, sum_intensity, apex_rt, n_iteration) 
+        return_df = rbind(return_df, temp_row) # include the beginning mass point
+      }
+      begin = TRUE
+      return_df = rbind(return_df, matched_row) #add the found row for return
+      temp_df = df %>% 
+        filter(monoisotopic_mass >= matched_row[1,2])
+      if(nrow(temp_df) > 1){
+        return_df = loop_up_match(temp_df, mass_bound, dictionary, return_df, nth_attempt, begin)
+      }
+    }
+  }
+  return(return_df) 
+} 
+
+# For testing
+#output_df = data.frame(matrix(ncol = 5))
+#colnames(output_df) = c("base_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+#output_df = output_df %>% 
+#  drop_na()
+#df = filter(df, monoisotopic_mass >= 612.1421)
+#test_df_result = loop_up_match(df, mass_bound, dictionary, output_df, 1, begin = FALSE)
+
+
+```
+
+#### Load Dataset
+```{r}
+# Add a function for ppm calculation
+ppm = function(observed, theo){
+  if(abs((observed - theo) / theo * 10^6) > 40) {
+    return(FALSE)
+  } else {
+    return(TRUE)
+  }
+}
+
+df = read.csv("PE_22_28/sk_PE_75FA_75degrees_90min_24.csv", skip = 2) %>% 
+  janitor::clean_names() %>% 
+  rename(monoisotopic_mass = mass, apex_rt = rt, sum_intensity = height) %>% 
+  select(monoisotopic_mass, apex_rt, sum_intensity) %>% 
+  mutate(apex_rt = as.numeric(apex_rt), monoisotopic_mass = as.numeric(monoisotopic_mass), sum_intensity = as.numeric(sum_intensity)) %>% 
+  arrange(desc(monoisotopic_mass)) %>% 
+  drop_na() %>% 
+  filter(monoisotopic_mass <= 780)
+
+```
+
+```{r}
+n_iteration = 0
+output_df = data.frame(matrix(ncol = 5))
+colnames(output_df) = c("amino_acid_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+output_df = output_df %>% 
+  drop_na()
+exhaustive_level = quantile(df$sum_intensity, 0.00000000001)# set exhaustive level
+while(nrow(df) > 1){
+  n_iteration = n_iteration + 1
+  highest_intensity_mass = df %>%
+    filter(sum_intensity == max(sum_intensity)) %>% 
+    filter(monoisotopic_mass == max(monoisotopic_mass)) #in case if there are two data points with same level of intensity
+  if(highest_intensity_mass$sum_intensity < exhaustive_level) { #exhaustion reached
+    break
+  }
+  loop_down_df = filter(df, monoisotopic_mass <= highest_intensity_mass$monoisotopic_mass)
+  loop_up_df = filter(df, monoisotopic_mass >= highest_intensity_mass$monoisotopic_mass)
+  temp_df = data.frame(matrix(ncol = 5))
+  colnames(temp_df) = c("amino_acid_name", "monoisotopic_mass", "sum_intensity", "apex_rt", "n_iteration")
+  temp_df = temp_df %>% 
+  drop_na()
+  temp_df = loop_up_match(loop_up_df, mass_bound, dictionary, temp_df, n_iteration, begin = FALSE) %>% 
+    arrange(desc(monoisotopic_mass))
+  output_df = rbind(output_df, temp_df)
+  output_df = loop_down_match(loop_down_df, mass_bound, dictionary, output_df, n_iteration, begin = FALSE)
+  df = anti_join(df, output_df, by = "monoisotopic_mass")
+  df = anti_join(df, highest_intensity_mass)
+}
+
+output_df = output_df %>% #make sure every row is unique, remove the replication of two high mass points in one iteration
+  distinct()
+``` 
+
+### Write the output data frame to an external file named sequencer_result, further create a file named matched for verification
+```{r}
+sink("sequencer_result.txt")
+sequence = as.character(output_df[1,]$n_iteration)
+current_iteration = output_df[1,]$n_iteration
+for(i in 1:nrow(output_df)){
+  if(output_df[i,]$n_iteration != current_iteration){
+    print(sequence)
+    sequence = as.character(output_df[i,]$n_iteration)
+    current_iteration = output_df[i,]$n_iteration
+  }
+  if(output_df[i,]$base_name != "High"){ 
+    sequence = paste0(sequence,output_df[i,]$base_name)
+  }
+}
+print(sequence)
+sink()
+lines = readLines("sequencer_result.txt")
+modified_lines = substr(lines, 6, nchar(lines) - 1)
+writeLines(modified_lines, "sequencer_result.txt") #remove the unnecessary characters
+
+
+# sequence with beginning and ending mass
+sink("easy_match.txt")
+sequence = as.character(paste0(output_df[1,]$n_iteration, " ", round(output_df[1,]$monoisotopic_mass, 3), " "))
+current_iteration = output_df[1,]$n_iteration
+for(i in 1:nrow(output_df)){
+  if(output_df[i,]$n_iteration != current_iteration){
+    sequence = paste0(sequence, round(output_df[i-1,]$monoisotopic_mass, 3))
+    print(sequence)
+    sequence = as.character(paste(output_df[i,]$n_iteration, " ", round(output_df[i,]$monoisotopic_mass, 3), " "))
+    current_iteration = output_df[i,]$n_iteration
+  }
+  if(output_df[i,]$base_name != "High"){ 
+    sequence = paste0(sequence,output_df[i,]$base_name)
+  }
+}
+print(paste0(sequence, round(output_df[nrow(output_df),]$monoisotopic_mass,3)))
+sink()
+```
+
+```{r}
+output_df %>% group_by(n_iteration) %>% 
+  count()
+```
+

@@ -1,0 +1,149 @@
+---
+title: "prophet_sequencer"
+author: "Shangsi Lin"
+date: "2024-09-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(dplyr)
+library(readxl)
+```
+
+This is a program that seeks to find whether a data set has all the mass point that it should contain based on a user decided sequence string for testing purposes on whether the dataset is theoretically possible to recover, since the user already knows what the sequence is going to look like, it is the "prophet".
+
+```{r standard_setup}
+dictionary = read_xlsx("Amino_acids_monoisotopic_ mass.xlsx") %>% 
+  select(one_letter_code, Monoisotopic_Mass) %>% 
+  rename(name = one_letter_code, mass = Monoisotopic_Mass) %>% 
+  filter(name %in% c("G", "E", "P", "K", "A", "D", "L", "V"))
+
+
+# Add function for loading the dataset to be sequenced
+
+
+# Add a function for ppm calculation
+load_df = function(df_name){
+  read.csv(df_name, skip = 2) %>% 
+  janitor::clean_names() %>% 
+  rename(monoisotopic_mass = mass, apex_rt = rt, sum_intensity = height) %>% 
+  arrange(desc(monoisotopic_mass)) %>%
+  select(monoisotopic_mass, apex_rt, sum_intensity) %>% 
+  mutate(apex_rt = as.numeric(apex_rt), monoisotopic_mass = as.numeric(monoisotopic_mass), sum_intensity = as.numeric(sum_intensity)) %>% 
+  drop_na()
+}
+
+#build a referece dataset first, including all the theoretical data points that should be found
+build_theo = function(known_sequence, reference){
+  return_df = data.frame(matrix(ncol = 2))
+  colnames(return_df) = c("amino_acid_name", "theoretical_mass")
+  return_df[1,1] = "Water"
+  return_df[1,2] = 18.015
+  i = 1
+  while(i <= nchar(known_sequence)) {
+    next_base = substr(known_sequence, i, i)
+    if(next_base == "("){
+      next_base = substr(known_sequence, i, i+3)
+    }
+    for(j in 1:nrow(reference)){
+      if(next_base == reference[j,1]){
+        return_df[nrow(return_df) + 1,2] = return_df[nrow(return_df),2] + reference[j,2]
+        return_df[nrow(return_df),1] = next_base
+        break
+      }
+    }
+    if(nchar(next_base) == 4){
+      i = i+3
+    } else{
+      i = i+1
+    }
+  }
+  return_df = return_df %>% 
+    mutate(n_position = row_number() - 1)
+  return(return_df)
+}
+
+prophet = function(df, theo_df){
+  return_df = data.frame(matrix(ncol = 6))
+  colnames(return_df) = c("amino_acid_name", "theoretical_mass", "n_position", "monoisotopic_mass", "sum_intensity", "apex_rt")
+  return_df = return_df %>% 
+    drop_na()
+  for(i in 1 : nrow(theo_df)) {
+    for(j in 1 : nrow(df)){
+      if(ppm(df[j,1], theo_df[i,2])){
+        temp_row = data.frame(matrix(ncol = 6))
+        colnames(temp_row) = c("amino_acid_name", "theoretical_mass", "n_position", "monoisotopic_mass", "sum_intensity", "apex_rt")
+        temp_row[1,1] = theo_df[i,1]
+        temp_row[1,2] = theo_df[i,2]
+        temp_row[1,3] = theo_df[i,3]
+        temp_row[1,4] = df[j,1]
+        temp_row[1,5] = df[j,2]
+        temp_row[1,6] = df[j,3]
+        return_df = rbind(return_df, temp_row)
+        break
+      }
+    }
+  }
+  return(return_df)
+}
+
+ppm = function(observed, theo){
+  if(abs((observed - theo) / theo * 10^6) > 40) {
+    return(FALSE)
+  } else {
+    return(TRUE)
+  }
+}
+```
+
+
+```{r}
+df = load_df("Data/241011/RNA678_Intact_T01_241011_LSS.xlsx")
+prophet_6_5 = prophet(df, theo_6_5)
+prophet_6_3 = prophet(df, theo_6_3)
+prophet_7_5 = prophet(df, theo_7_5)
+prophet_7_3 = prophet(df, theo_7_3)
+prophet_8_5 = prophet(df, theo_8_5)
+prophet_8_3 = prophet(df, theo_8_3)
+```
+
+```{r BPC}
+df = load_df("BPC_157/sk_bpc_157__75FA_80degrees_60min_241109.csv")
+BPC_N = "GEPPPGKPADDAGLV"
+BPC_C = "VLGADDAPKGPPPE"
+theo_BPC_N = build_theo(BPC_N, dictionary)
+theo_BPC_C = build_theo(BPC_C, dictionary)
+prophet_BPC_N = prophet(df, theo_BPC_N)
+prophet_BPC_C = prophet(df, theo_BPC_C)
+```
+
+```{r RNA_257_prophet}
+df = load_df("Data/05FA_20nt/RNA2_05FA_80min_T01_241107_LSS.xlsx")
+prophet_2_5 = prophet(df, theo_2_5)
+prophet_2_3 = prophet(df, theo_2_3)
+prophet_5_5 = prophet(df, theo_5_5)
+prophet_5_3 = prophet(df, theo_5_3)
+prophet_7_5_new = prophet(df, theo_7_5)
+prophet_7_3_new = prophet(df, theo_7_3)
+```
+
+```{r PE}
+df = read.csv("PE_22_28/sk_PE_75FA_75degrees_90min_24.csv", skip = 2) %>% 
+  janitor::clean_names() %>% 
+  rename(monoisotopic_mass = mass, apex_rt = rt, sum_intensity = height) %>% 
+  select(monoisotopic_mass, apex_rt, sum_intensity) %>% 
+  mutate(apex_rt = as.numeric(apex_rt), monoisotopic_mass = as.numeric(monoisotopic_mass), sum_intensity = as.numeric(sum_intensity)) %>% 
+  arrange(desc(monoisotopic_mass)) %>% 
+  drop_na()
+PE_N = "GVSWGLR"
+theo_PE_N = build_theo(PE_N, dictionary)
+PE_C = "RLGWSV"
+theo_PE_C = build_theo(PE_C, dictionary)
+prophet_PE_C = prophet(df, theo_PE_C)
+prophet_PE_N = prophet(df, theo_PE_N)
+tibble(df)
+```
+
+
